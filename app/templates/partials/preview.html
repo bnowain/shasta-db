@@ -1,0 +1,100 @@
+<div class="previewHeader">
+  <div>
+    <div class="previewTitle">File Preview: {{ item.name }}</div>
+    <div class="previewSub">{{ item.rel_path }}</div>
+  </div>
+  <div class="previewBadges">
+    <span class="pill">{{ item.kind }}</span>
+    <span class="pill">{{ item.ext }}</span>
+    {% if item.skip_processing %}<span class="pill">Skip Processing</span>{% endif %}
+  </div>
+</div>
+
+<div class="previewBody">
+  {% if item.kind == "video" %}
+    <video controls class="media" src="/file/{{ item.id }}"></video>
+  {% elif item.kind == "audio" %}
+    <audio controls class="media" src="/file/{{ item.id }}"></audio>
+  {% elif item.kind == "image" %}
+    <img class="media" src="/file/{{ item.id }}" />
+  {% elif item.kind == "pdf" %}
+    <iframe class="media frame" src="/file/{{ item.id }}"></iframe>
+  {% elif item.kind == "text" %}
+    <div class="textBox">
+      <a class="btn" href="/file/{{ item.id }}">Download / Open</a>
+      <p class="hint">Text preview is basic for now (download/open above). Later we’ll render snippets.</p>
+    </div>
+  {% else %}
+    <div class="textBox">
+      <a class="btn" href="/file/{{ item.id }}">Open / Download</a>
+      <p class="hint">No inline preview for this type yet.</p>
+    </div>
+  {% endif %}
+</div>
+
+<hr/>
+
+<div class="meta">
+  <h3>Edit Metadata</h3>
+
+  <form id="metaForm"
+        hx-patch="/instances/{{ item.id }}"
+        hx-trigger="submit"
+        hx-swap="none">
+    <div class="row">
+      <label>Title</label>
+      <input name="display_title" value="{{ item.display_title or '' }}" placeholder="Optional display title" />
+    </div>
+
+    <div class="row">
+      <label>Category</label>
+      <select name="category">
+        {% for c in categories %}
+          <option value="{{ c }}" {% if item.category == c %}selected{% endif %}>
+            {{ "All" if c=="" else c }}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="row inline">
+      <label class="check">
+        <input type="checkbox" name="needs_review" value="true" {% if item.needs_review %}checked{% endif %}>
+        Needs Review
+      </label>
+    </div>
+
+    <div class="row inline">
+      <button class="btn" type="submit">Save Changes</button>
+      <a class="btn" href="/file/{{ item.id }}">Open File</a>
+    </div>
+  </form>
+
+  <h3>People</h3>
+  <div class="chips">
+    {% for link in item.people_links %}
+      <span class="chip">
+        {{ link.person.name }}
+        <button class="chipX"
+                hx-delete="/instances/{{ item.id }}/people/{{ link.person.id }}"
+                hx-target="#previewPane"
+                hx-swap="innerHTML"
+                hx-get="/ui/preview/{{ item.id }}"
+                hx-trigger="click">×</button>
+      </span>
+    {% endfor %}
+    {% if item.people_links|length == 0 %}
+      <span class="hint">No people assigned yet.</span>
+    {% endif %}
+  </div>
+
+  <form class="row inline"
+        hx-post="/instances/{{ item.id }}/people"
+        hx-target="#previewPane"
+        hx-swap="innerHTML"
+        hx-get="/ui/preview/{{ item.id }}"
+        hx-trigger="submit">
+    <input name="person_name" placeholder="Add person (e.g., Clint Curtis)" />
+    <button class="btn" type="submit">Add</button>
+  </form>
+</div>

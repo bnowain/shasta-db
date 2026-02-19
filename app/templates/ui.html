@@ -1,0 +1,126 @@
+﻿<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Archive DB</title>
+  <link rel="stylesheet" href="/static/ui.css">
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Archive DB</div>
+    <div class="nav">
+      <a href="/ui">Dashboard</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- LEFT: Browser -->
+    <section class="left">
+      <h2>Browse Files</h2>
+
+      <form id="filters"
+            hx-get="/ui/list"
+            hx-target="#fileList"
+            hx-trigger="submit"
+            class="filters">
+
+        <div class="row">
+  <label>Person</label>
+  <input name="person" id="person" type="text" placeholder="Clint Curtis (optional)" />
+  <small class="hint">Type a name (partial match ok). Leave blank for all.</small>
+</div>
+
+        <div class="row">
+          <label>Category</label>
+          <select name="category">
+            {% for c in categories %}
+              <option value="{{ c }}">{{ "All" if c=="" else c }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="row">
+          <label>Type</label>
+          <select name="kind">
+            <option value="">All</option>
+            <option value="video">video</option>
+            <option value="audio">audio</option>
+            <option value="image">image</option>
+            <option value="pdf">pdf</option>
+            <option value="doc">doc</option>
+            <option value="text">text</option>
+            <option value="exe">exe</option>
+            <option value="other">other</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <label>Ext</label>
+          <input name="ext" placeholder=".mp4" />
+        </div>
+
+        <div class="row">
+          <label>Needs Review</label>
+          <select name="needs_review">
+            <option value="all">All</option>
+            <option value="true">Needs Review only</option>
+            <option value="false">Reviewed only</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <label>Sort</label>
+          <select name="sort">
+            <option value="mtime_desc">Newest → Oldest</option>
+            <option value="mtime_asc">Oldest → Newest</option>
+            <option value="name_asc">Name A → Z</option>
+            <option value="name_desc">Name Z → A</option>
+            <option value="size_desc">Size large → small</option>
+            <option value="size_asc">Size small → large</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <label>Search</label>
+          <input name="q" placeholder="Search filename/path/title..." />
+        </div>
+
+        <div class="row inline">
+          <label class="check">
+            <input type="checkbox" name="hide_junk" value="true" checked>
+            Hide system files
+          </label>
+        </div>
+
+        <div class="row inline">
+          <label>Page size</label>
+          <select name="page_size">
+            <option>25</option>
+            <option>50</option>
+            <option>100</option>
+          </select>
+          <input type="hidden" name="page" value="1">
+          <button class="btn" type="submit">Search</button>
+        </div>
+      </form>
+
+      <div id="fileList"
+           hx-get="/ui/list"
+           hx-target="#fileList"
+           hx-include="#filters"
+           hx-trigger="load">
+        <!-- list loads here -->
+      </div>
+    </section>
+
+    <!-- RIGHT: Preview -->
+    <section class="right">
+      <div id="previewPane" class="preview">
+        <div class="empty">Select a file on the left to preview and edit metadata.</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+

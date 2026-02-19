@@ -1,0 +1,451 @@
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Literal, Optional
+
+from fastapi import FastAPI, HTTPException, Query, Form
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+from sqlalchemy import select, update, delete, func
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
+
+from starlette.templating import Jinja2Templates
+from starlette.requests import Request
+
+from .db import SessionLocal, init_db
+from .models import Root, Instance, Person, InstancePerson
+from .settings import settings
+
+app = FastAPI(title="Archive Tool", version="0.2")
+
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+CATEGORIES = ["", "Government Meetings", "Podcasts", "Social Media", "Public Records", "Unknown"]
+
+def utc_from_ts(ts: float) -> datetime:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
+
+def guess_kind(ext: str) -> str:
+    e = (ext or "").lower()
+    if e in [".mp4", ".mkv", ".mov", ".avi", ".wmv", ".m4v"]:
+        return "video"
+    if e in [".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus"]:
+        return "audio"
+    if e in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".tiff", ".bmp"]:
+        return "image"
+    if e in [".pdf"]:
+        return "pdf"
+    if e in [".doc", ".docx", ".rtf", ".odt"]:
+        return "doc"
+    if e in [".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".xml", ".html"]:
+        return "text"
+    if e in [".exe"]:
+        return "exe"
+    return "other"
+
+@app.on_event("startup")
+async def _startup():
+    await init_db()
+    # seed root
+    async with SessionLocal() as db:
+        res = await db.execute(select(Root).where(Root.name == settings.initial_root_name))
+        root = res.scalar_one_or_none()
+        if root is None:
+            root = Root(name=settings.initial_root_name, path=settings.initial_root_path, is_active=True)
+            db.add(root)
+            await db.commit()
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/roots")
+async def list_roots():
+    async with SessionLocal() as db:
+        res = await db.execute(select(Root).order_by(Root.name))
+        roots = res.scalars().all()
+        return [{"id": r.id, "name": r.name, "path": r.path, "is_active": r.is_active} for r in roots]
+
+@app.post("/roots/{root_id}/path")
+async def update_root_path(root_id: int, new_path: str = Query(..., description="New physical path for this root")):
+    p = Path(new_path)
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(400, "new_path must be an existing directory")
+
+    async with SessionLocal() as db:
+        res = await db.execute(select(Root).where(Root.id == root_id))
+        root = res.scalar_one_or_none()
+        if not root:
+            raise HTTPException(404, "root not found")
+        root.path = str(p)
+        await db.commit()
+        return {"ok": True, "root_id": root_id, "path": root.path}
+
+@app.post("/ingest")
+async def ingest(
+    root_name: str = Query(settings.initial_root_name, description="Which root name to ingest"),
+    limit: int = Query(0, description="0 = no limit; otherwise max files to ingest"),
+):
+    async with SessionLocal() as db:
+        res = await db.execute(select(Root).where(Root.name == root_name))
+        root = res.scalar_one_or_none()
+        if not root:
+            raise HTTPException(404, f"root '{root_name}' not found")
+
+        root_path = Path(root.path)
+        if not root_path.exists():
+            raise HTTPException(400, f"root path does not exist: {root.path}")
+
+        added = updated_count = 0
+        seen = 0
+        now = datetime.utcnow()
+
+        for p in root_path.rglob("*"):
+            if not p.is_file():
+                continue
+
+            rel = str(p.relative_to(root_path)).replace("/", "\\")
+            ext = p.suffix.lower()
+            name = p.name
+            stat = p.stat()
+
+            kind = guess_kind(ext)
+            skip_processing = (kind == "exe")
+
+            inst = Instance(
+                root_id=root.id,
+                rel_path=rel,
+                name=name,
+                ext=ext,
+                size_bytes=int(stat.st_size),
+                mtime_utc=utc_from_ts(stat.st_mtime),
+                kind=kind,
+                needs_review=False,
+                skip_processing=skip_processing,
+                last_seen_utc=now,
+            )
+
+            try:
+                db.add(inst)
+                await db.flush()
+                added += 1
+            except IntegrityError:
+                await db.rollback()
+                q = (
+                    update(Instance)
+                    .where(Instance.root_id == root.id, Instance.rel_path == rel)
+                    .values(
+                        name=name,
+                        ext=ext,
+                        size_bytes=int(stat.st_size),
+                        mtime_utc=utc_from_ts(stat.st_mtime),
+                        kind=kind,
+                        skip_processing=skip_processing,
+                        last_seen_utc=now,
+                    )
+                )
+                await db.execute(q)
+                updated_count += 1
+
+            seen += 1
+            if limit and seen >= limit:
+                break
+
+        await db.commit()
+        return {"root": {"id": root.id, "name": root.name, "path": root.path}, "seen": seen, "added": added, "updated": updated_count}
+
+# ----------------------------
+# API: basic search (JSON)
+# ----------------------------
+@app.get("/search")
+async def search(
+    q: str = Query("", description="Search substring for filename/path"),
+    kind: str = Query("", description="Filter kind: video/audio/image/pdf/doc/text/exe/other"),
+    ext: str = Query("", description="Filter extension like .mp4"),
+    needs_review: bool | None = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+):
+    async with SessionLocal() as db:
+        stmt = select(Instance, Root).join(Root, Root.id == Instance.root_id)
+
+        if q:
+            like = f"%{q.lower()}%"
+            stmt = stmt.where((Instance.name.ilike(like)) | (Instance.rel_path.ilike(like)))
+        if kind:
+            stmt = stmt.where(Instance.kind == kind)
+        if ext:
+            stmt = stmt.where(Instance.ext == ext.lower())
+        if needs_review is not None:
+            stmt = stmt.where(Instance.needs_review == needs_review)
+
+        stmt = stmt.order_by(Instance.mtime_utc.desc()).limit(limit)
+        res = await db.execute(stmt)
+        rows = res.all()
+
+        out = []
+        for inst, root in rows:
+            out.append({
+                "instance_id": inst.id,
+                "kind": inst.kind,
+                "ext": inst.ext,
+                "size_bytes": inst.size_bytes,
+                "mtime_utc": inst.mtime_utc.isoformat(),
+                "root": {"id": root.id, "name": root.name},
+                "rel_path": inst.rel_path,
+                "name": inst.name,
+                "skip_processing": inst.skip_processing,
+                "needs_review": inst.needs_review,
+                "category": inst.category,
+                "display_title": inst.display_title,
+            })
+        return {"count": len(out), "results": out}
+
+# ----------------------------
+# File streaming
+# ----------------------------
+@app.get("/file/{instance_id}")
+async def get_file(instance_id: int):
+    async with SessionLocal() as db:
+        res = await db.execute(
+            select(Instance, Root)
+            .join(Root, Root.id == Instance.root_id)
+            .where(Instance.id == instance_id)
+        )
+        row = res.first()
+        if not row:
+            raise HTTPException(404, "instance not found")
+        inst, root = row
+
+        root_path = Path(root.path)
+        full_path = root_path / inst.rel_path
+
+        try:
+            full_resolved = full_path.resolve()
+            root_resolved = root_path.resolve()
+            if root_resolved not in full_resolved.parents and full_resolved != root_resolved:
+                raise HTTPException(403, "path escape detected")
+        except FileNotFoundError:
+            raise HTTPException(404, "file not found on disk (maybe moved). Update root path or rescan.")
+
+        if not full_resolved.exists():
+            raise HTTPException(404, "file not found on disk")
+
+        return FileResponse(str(full_resolved))
+
+# ----------------------------
+# Metadata editing (GUI uses this)
+# ----------------------------
+@app.patch("/instances/{instance_id}")
+async def patch_instance(
+    instance_id: int,
+    display_title: Optional[str] = Form(None),
+    category: Optional[str] = Form(None),
+    needs_review: Optional[bool] = Form(None),
+):
+    async with SessionLocal() as db:
+        res = await db.execute(select(Instance).where(Instance.id == instance_id))
+        inst = res.scalar_one_or_none()
+        if not inst:
+            raise HTTPException(404, "instance not found")
+
+        if display_title is not None:
+            inst.display_title = display_title.strip() or None
+        if category is not None:
+            inst.category = category.strip() or None
+        if needs_review is not None:
+            inst.needs_review = bool(needs_review)
+
+        await db.commit()
+        return {"ok": True}
+
+# ----------------------------
+# People: list + attach/detach
+# ----------------------------
+@app.get("/people")
+async def list_people(q: str = Query("", description="optional filter by substring"), limit: int = Query(200, ge=1, le=2000)):
+    async with SessionLocal() as db:
+        stmt = select(Person).order_by(Person.name.asc())
+        if q:
+            stmt = stmt.where(Person.name.ilike(f"%{q}%"))
+        stmt = stmt.limit(limit)
+        res = await db.execute(stmt)
+        people = res.scalars().all()
+        return [{"id": p.id, "name": p.name} for p in people]
+
+async def _get_or_create_person(db, name: str) -> Person:
+    nm = name.strip()
+    if not nm:
+        raise HTTPException(400, "person name empty")
+    res = await db.execute(select(Person).where(Person.name == nm))
+    p = res.scalar_one_or_none()
+    if p:
+        return p
+    p = Person(name=nm)
+    db.add(p)
+    await db.flush()
+    return p
+
+@app.post("/instances/{instance_id}/people")
+async def add_person_to_instance(instance_id: int, person_name: str = Form(...)):
+    async with SessionLocal() as db:
+        res = await db.execute(select(Instance).where(Instance.id == instance_id))
+        inst = res.scalar_one_or_none()
+        if not inst:
+            raise HTTPException(404, "instance not found")
+
+        person = await _get_or_create_person(db, person_name)
+
+        # upsert link
+        link = await db.execute(
+            select(InstancePerson).where(
+                InstancePerson.instance_id == instance_id,
+                InstancePerson.person_id == person.id
+            )
+        )
+        if link.scalar_one_or_none() is None:
+            db.add(InstancePerson(instance_id=instance_id, person_id=person.id, source="manual"))
+
+        await db.commit()
+        return {"ok": True}
+
+@app.delete("/instances/{instance_id}/people/{person_id}")
+async def remove_person_from_instance(instance_id: int, person_id: int):
+    async with SessionLocal() as db:
+        await db.execute(
+            delete(InstancePerson).where(
+                InstancePerson.instance_id == instance_id,
+                InstancePerson.person_id == person_id
+            )
+        )
+        await db.commit()
+        return {"ok": True}
+
+# ----------------------------
+# UI (Jinja2 + HTMX)
+# ----------------------------
+@app.get("/ui", response_class=HTMLResponse)
+async def ui_home(request: Request):
+    # Page shell; content loads via HTMX
+    return templates.TemplateResponse(
+        "ui.html",
+        {
+            "request": request,
+            "categories": CATEGORIES,
+        },
+    )
+
+def _apply_filters(stmt, q: str, kind: str, ext: str, category: str, needs_review: str, person_id: int | None, hide_junk: bool):
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where((Instance.name.ilike(like)) | (Instance.rel_path.ilike(like)) | (Instance.display_title.ilike(like)))
+    if kind:
+        stmt = stmt.where(Instance.kind == kind)
+    if ext:
+        stmt = stmt.where(Instance.ext == ext.lower())
+    if category:
+        stmt = stmt.where(Instance.category == category)
+
+    if needs_review == "true":
+        stmt = stmt.where(Instance.needs_review == True)
+    elif needs_review == "false":
+        stmt = stmt.where(Instance.needs_review == False)
+
+    if person_id:
+        stmt = stmt.join(InstancePerson, InstancePerson.instance_id == Instance.id).where(InstancePerson.person_id == person_id)
+
+    if hide_junk:
+        stmt = stmt.where(Instance.name != "desktop.ini").where(Instance.ext != ".ini")
+
+    return stmt
+
+def _apply_sort(stmt, sort: str):
+    sort = sort or "mtime_desc"
+    if sort == "mtime_desc":
+        return stmt.order_by(Instance.mtime_utc.desc())
+    if sort == "mtime_asc":
+        return stmt.order_by(Instance.mtime_utc.asc())
+    if sort == "name_asc":
+        return stmt.order_by(Instance.name.asc())
+    if sort == "name_desc":
+        return stmt.order_by(Instance.name.desc())
+    if sort == "size_desc":
+        return stmt.order_by(Instance.size_bytes.desc())
+    if sort == "size_asc":
+        return stmt.order_by(Instance.size_bytes.asc())
+    return stmt.order_by(Instance.mtime_utc.desc())
+
+@app.get("/ui/list", response_class=HTMLResponse)
+async def ui_list(
+    request: Request,
+    q: str = "",
+    kind: str = "",
+    ext: str = "",
+    category: str = "",
+    needs_review: str = "all",  # all|true|false
+    person_id: int | None = None,
+    hide_junk: bool = True,
+    sort: str = "mtime_desc",
+    page: int = 1,
+    page_size: int = 25,
+):
+    page = max(page, 1)
+    page_size = 25 if page_size not in (25, 50, 100) else page_size
+    offset = (page - 1) * page_size
+
+    async with SessionLocal() as db:
+        base = select(Instance)
+        base = _apply_filters(base, q, kind, ext, category, needs_review, person_id, hide_junk)
+
+        # total count
+        count_stmt = select(func.count()).select_from(base.subquery())
+        total = (await db.execute(count_stmt)).scalar_one()
+
+        stmt = _apply_sort(base, sort).offset(offset).limit(page_size)
+        res = await db.execute(stmt)
+        items = res.scalars().all()
+
+        return templates.TemplateResponse(
+            "partials/file_list.html",
+            {
+                "request": request,
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "sort": sort,
+                "q": q,
+                "kind": kind,
+                "ext": ext,
+                "category": category,
+                "needs_review": needs_review,
+                "person_id": person_id,
+                "hide_junk": hide_junk,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            },
+        )
+
+@app.get("/ui/preview/{instance_id}", response_class=HTMLResponse)
+async def ui_preview(request: Request, instance_id: int):
+    async with SessionLocal() as db:
+        res = await db.execute(
+            select(Instance)
+            .options(selectinload(Instance.people_links).selectinload(InstancePerson.person))
+            .where(Instance.id == instance_id)
+        )
+        inst = res.scalar_one_or_none()
+        if not inst:
+            raise HTTPException(404, "instance not found")
+
+        return templates.TemplateResponse(
+            "partials/preview.html",
+            {
+                "request": request,
+                "item": inst,
+                "categories": CATEGORIES,
+            },
+        )

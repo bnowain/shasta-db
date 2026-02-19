@@ -1,0 +1,22 @@
+# venv
+.venv
+__pycache__
+.pyc
+
+# local dbdata
+data
+.sqlite
+.sqlite3
+
+# logstemp
+.log
+.tmp
+
+# OSeditor
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# backups created by patch scripts
+.bak_

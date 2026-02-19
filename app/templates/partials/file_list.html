@@ -1,0 +1,39 @@
+﻿<div class="listHeader">
+  <div><strong>{{ total }}</strong> results</div>
+  <div>Page {{ page }} / {{ pages }}</div>
+</div>
+
+<div class="fileList">
+  {% for f in items %}
+    <button class="fileRow"
+            hx-get="/ui/preview/{{ f.id }}"
+            hx-target="#previewPane"
+            hx-swap="innerHTML">
+      <div class="fileTitle">{{ (f.display_title or f.name) }}</div>
+      <div class="fileMeta">
+        <span class="pill">{{ f.kind }}</span>
+        <span class="pill">{{ f.ext }}</span>
+        {% if f.category %}<span class="pill">{{ f.category }}</span>{% endif %}
+        {% if f.needs_review %}<span class="pill warn">Needs Review</span>{% endif %}
+      </div>
+      <div class="filePath">{{ f.rel_path }}</div>
+    </button>
+  {% endfor %}
+</div>
+
+<div class="pager">
+  {% set prev = page - 1 %}
+  {% set next = page + 1 %}
+  <button class="btn"
+          {% if page <= 1 %}disabled{% endif %}
+          hx-get="/ui/list?page={{ prev }}&page_size={{ page_size }}&sort={{ sort }}&q={{ q }}&kind={{ kind }}&ext={{ ext }}&category={{ category }}&needs_review={{ needs_review }}{% if hide_junk %}&hide_junk=true{% endif %}"
+          hx-target="#fileList"
+          hx-include="#filters">Prev</button>
+
+  <button class="btn"
+          {% if page >= pages %}disabled{% endif %}
+          hx-get="/ui/list?page={{ next }}&page_size={{ page_size }}&sort={{ sort }}&q={{ q }}&kind={{ kind }}&ext={{ ext }}&category={{ category }}&needs_review={{ needs_review }}{% if hide_junk %}&hide_junk=true{% endif %}"
+          hx-target="#fileList"
+          hx-include="#filters">Next</button>
+</div>
+
