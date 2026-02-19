@@ -1,0 +1,29 @@
+@"
+# venv
+.venv/
+__pycache__/
+*.pyc
+
+# local db/data
+data/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# logs/temp
+*.log
+*.tmp
+
+# backups created by patch scripts
+*.bak_*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+"@ | Out-File -Encoding utf8 .gitignore
