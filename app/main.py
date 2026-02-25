@@ -16,9 +16,11 @@ from starlette.requests import Request
 
 from .db import SessionLocal, init_db
 from .models import Root, Instance, Person, InstancePerson
+from .routers import system as system_router
 from .settings import settings
 
 app = FastAPI(title="Archive Tool", version="0.2")
+app.include_router(system_router.router)
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
